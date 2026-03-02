@@ -37,7 +37,7 @@ func TestParseStat(t *testing.T) {
 		"1000 0 0 0 500 100 0 0 20 0 1 0 98765 100000000 5000 " +
 		"18446744073709551615 0 0 0 0 0 0 0 0 0 0 0 0 17 0 0 0 0 0 0"
 
-	pid, comm, ttyNr, utime, stime, starttime, rssPages, err := parseStat(line)
+	pid, comm, ppid, ttyNr, utime, stime, starttime, rssPages, err := parseStat(line)
 	if err != nil {
 		t.Fatalf("parseStat() error: %v", err)
 	}
@@ -46,6 +46,9 @@ func TestParseStat(t *testing.T) {
 	}
 	if comm != "python gen.py" {
 		t.Errorf("comm = %q, want %q", comm, "python gen.py")
+	}
+	if ppid != 12340 {
+		t.Errorf("ppid = %d, want 12340", ppid)
 	}
 	// tty_nr is field 7, index 4 in rest after comm
 	// From our line: 34819 = 0x8803 → major=136, minor=3 → pts/3
@@ -71,7 +74,7 @@ func TestParseStatCommWithParens(t *testing.T) {
 	line := "999 (bash (deleted)) S 1 999 999 0 999 0 0 0 0 0 10 5 0 0 20 0 1 0 1000 50000 200 " +
 		"18446744073709551615 0 0 0 0 0 0 0 0 0 0 0 0 17 0 0 0 0 0 0"
 
-	pid, comm, _, _, _, _, _, err := parseStat(line)
+	pid, comm, _, _, _, _, _, _, err := parseStat(line)
 	if err != nil {
 		t.Fatalf("parseStat() error: %v", err)
 	}
@@ -94,7 +97,7 @@ func TestParseStatMalformed(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, _, _, _, _, _, _, err := parseStat(tt.data)
+			_, _, _, _, _, _, _, _, err := parseStat(tt.data)
 			if err == nil {
 				t.Error("parseStat() expected error, got nil")
 			}

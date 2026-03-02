@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"text/tabwriter"
+	"unicode/utf8"
 )
 
 // ANSI color codes.
@@ -68,7 +69,7 @@ func main() {
 	topN := flag.Int("n", 0, "show top N panes (0 = all)")
 	sortField := flag.String("s", "cpu", "sort by: cpu, mem, rss, procs")
 	filterPane := flag.String("p", "", "show all processes for a specific pane (e.g. \"work:0.1\")")
-	showTree := flag.Bool("t", false, "show process tree for top pane")
+	showTree := flag.Bool("t", false, "show process trees for all panes")
 	groupBySession := flag.Bool("g", false, "group by session, sorted by cumulative memory")
 	flag.Parse()
 
@@ -82,19 +83,38 @@ func main() {
 		os.Exit(1)
 	}
 
-	ttyMap := TTYToPaneMap(panes)
-
 	procs, err := ReadAllProcs()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error reading /proc: %v\n", err)
 		os.Exit(1)
 	}
 
-	// Group procs by pane.
-	paneProcs := make(map[string][]ProcStat) // key: short tty
+	// Build PID lookup and child map for tree walking.
+	pidMap := make(map[int]ProcStat)
 	for _, p := range procs {
-		if _, ok := ttyMap[p.TTY]; ok {
-			paneProcs[p.TTY] = append(paneProcs[p.TTY], p)
+		pidMap[p.PID] = p
+	}
+	childMap := BuildChildMap(procs)
+
+	// Group procs by pane using tree walk from pane PID.
+	paneProcs := make(map[string][]ProcStat) // key: short tty
+	for _, pane := range panes {
+		short := strings.TrimPrefix(pane.TTY, "/dev/")
+		if pane.PID > 0 {
+			// Tree walk: find all descendants of pane's root process
+			desc := Descendants(childMap, pane.PID)
+			for pid := range desc {
+				if ps, ok := pidMap[pid]; ok {
+					paneProcs[short] = append(paneProcs[short], ps)
+				}
+			}
+		} else {
+			// Fallback: TTY matching (pane_pid unavailable)
+			for _, p := range procs {
+				if p.TTY == short {
+					paneProcs[short] = append(paneProcs[short], p)
+				}
+			}
 		}
 	}
 
@@ -155,18 +175,12 @@ func main() {
 		}
 	}
 
-	if *groupBySession {
+	if *showTree {
+		renderTree(summaries, paneSort, *topN)
+	} else if *groupBySession {
 		renderGrouped(summaries, paneSort, *topN)
 	} else {
 		renderFlat(summaries, paneSort, *topN)
-	}
-
-	// Handle -t flag.
-	if *showTree && len(summaries) > 0 {
-		sort.Slice(summaries, func(i, j int) bool {
-			return paneSort(summaries[i], summaries[j])
-		})
-		showProcessTree(summaries[0])
 	}
 }
 
@@ -378,36 +392,137 @@ func showPaneDetail(paneID string, panes []Pane, paneProcs map[string][]ProcStat
 	}
 }
 
-func showProcessTree(top PaneSummary) {
-	fmt.Printf("\n%sProcess tree for top pane %s (%s):%s\n\n",
-		bold, top.Pane.PaneID(), top.Pane.TTY, reset)
+type treeEntry struct {
+	proc      ProcStat
+	prefix    string
+	paneLabel string // non-empty for the first entry of each pane
+}
 
-	// Sort by CPU desc.
-	procs := make([]ProcStat, len(top.Procs))
-	copy(procs, top.Procs)
-	sort.Slice(procs, func(i, j int) bool {
-		return procs[i].CPUPct > procs[j].CPUPct
+func renderTree(summaries []PaneSummary, less func(a, b PaneSummary) bool, topN int) {
+	sort.Slice(summaries, func(i, j int) bool {
+		return less(summaries[i], summaries[j])
 	})
-
-	var buf bytes.Buffer
-	w := tabwriter.NewWriter(&buf, 0, 4, 2, ' ', 0)
-	fmt.Fprintf(w, "PID\tCPU%%\tMEM%%\tRSS\tCOMMAND\n")
-	for _, p := range procs {
-		fmt.Fprintf(w, "%d\t%5.1f\t%5.1f\t%s\t%s\n",
-			p.PID, p.CPUPct, p.MemPct, formatRSS(p.RSS), p.Comm)
+	if topN > 0 && topN < len(summaries) {
+		summaries = summaries[:topN]
 	}
-	w.Flush()
 
-	lines := strings.Split(buf.String(), "\n")
-	for i, line := range lines {
-		if line == "" {
+	// Build all tree entries across all panes.
+	var allEntries []treeEntry
+	for _, s := range summaries {
+		if len(s.Procs) == 0 {
 			continue
 		}
-		if i == 0 {
-			fmt.Println(bold + line + reset)
-		} else if i-1 < len(procs) {
-			c := colorForCPU(procs[i-1].CPUPct)
-			fmt.Println(c + line + reset)
+		paneEntries := buildPaneTree(s)
+		// Tag the first entry with the pane label.
+		if len(paneEntries) > 0 {
+			paneEntries[0].paneLabel = fmt.Sprintf("[%s]", s.Pane.PaneID())
+		}
+		allEntries = append(allEntries, paneEntries...)
+	}
+
+	if len(allEntries) == 0 {
+		fmt.Println(dim + "(no processes)" + reset)
+		return
+	}
+
+	// Find max display widths for column alignment.
+	maxPIDCol := 3
+	maxCmdCol := 7 // "COMMAND"
+	for _, e := range allEntries {
+		w := utf8.RuneCountInString(e.prefix) + len(fmt.Sprintf("%d", e.proc.PID))
+		if w > maxPIDCol {
+			maxPIDCol = w
+		}
+		if len(e.proc.Comm) > maxCmdCol {
+			maxCmdCol = len(e.proc.Comm)
 		}
 	}
+
+	// Print header.
+	hdr := fmt.Sprintf("%-*s  %5s  %5s  %5s  %-*s  %s",
+		maxPIDCol, "PID", "CPU%", "MEM%", "RSS", maxCmdCol, "COMMAND", "PANE")
+	fmt.Println(bold + hdr + reset)
+
+	// Print entries.
+	for _, e := range allEntries {
+		pidStr := fmt.Sprintf("%s%d", e.prefix, e.proc.PID)
+		padLen := maxPIDCol - utf8.RuneCountInString(pidStr)
+		if padLen < 0 {
+			padLen = 0
+		}
+		line := fmt.Sprintf("%s%s  %5.1f  %5.1f  %5s  %-*s",
+			pidStr, strings.Repeat(" ", padLen),
+			e.proc.CPUPct, e.proc.MemPct, formatRSS(e.proc.RSS),
+			maxCmdCol, e.proc.Comm)
+		if e.paneLabel != "" {
+			line += "  " + dim + e.paneLabel + reset
+		}
+		c := colorForCPU(e.proc.CPUPct)
+		fmt.Println(c + line + reset)
+	}
+}
+
+func buildPaneTree(s PaneSummary) []treeEntry {
+	pidMap := make(map[int]ProcStat)
+	childMap := make(map[int][]int)
+	for _, p := range s.Procs {
+		pidMap[p.PID] = p
+		childMap[p.PPID] = append(childMap[p.PPID], p.PID)
+	}
+
+	// Sort children by CPU desc at each level.
+	for ppid := range childMap {
+		kids := childMap[ppid]
+		sort.Slice(kids, func(i, j int) bool {
+			return pidMap[kids[i]].CPUPct > pidMap[kids[j]].CPUPct
+		})
+	}
+
+	var entries []treeEntry
+
+	var walk func(pid int, prefix string, isLast bool, depth int)
+	walk = func(pid int, prefix string, isLast bool, depth int) {
+		if _, ok := pidMap[pid]; !ok {
+			return
+		}
+
+		var connector string
+		if depth == 0 {
+			connector = ""
+		} else if isLast {
+			connector = prefix + "└─"
+		} else {
+			connector = prefix + "├─"
+		}
+
+		entries = append(entries, treeEntry{proc: pidMap[pid], prefix: connector})
+
+		var childPrefix string
+		if depth == 0 {
+			childPrefix = ""
+		} else if isLast {
+			childPrefix = prefix + "  "
+		} else {
+			childPrefix = prefix + "│ "
+		}
+
+		for i, child := range childMap[pid] {
+			walk(child, childPrefix, i == len(childMap[pid])-1, depth+1)
+		}
+	}
+
+	walk(s.Pane.PID, "", true, 0)
+
+	// Collect orphans.
+	visited := make(map[int]bool)
+	for _, e := range entries {
+		visited[e.proc.PID] = true
+	}
+	for _, p := range s.Procs {
+		if !visited[p.PID] {
+			entries = append(entries, treeEntry{proc: p, prefix: "? "})
+		}
+	}
+
+	return entries
 }

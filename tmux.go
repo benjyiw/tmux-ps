@@ -14,6 +14,7 @@ type Pane struct {
 	PaneIdx int
 	TTY     string // e.g. "/dev/pts/3"
 	Command string // current foreground command
+	PID     int    // pane's initial process PID (usually the shell)
 }
 
 // PaneID returns a human-readable identifier like "work:0.1".
@@ -29,7 +30,7 @@ func (p Pane) WindowLabel() string {
 // ListPanes shells out to tmux and returns all panes across all sessions.
 func ListPanes() ([]Pane, error) {
 	cmd := exec.Command("tmux", "list-panes", "-a", "-F",
-		"#{session_name} #{window_index} #{pane_index} #{pane_tty} #{pane_current_command}")
+		"#{session_name} #{window_index} #{pane_index} #{pane_tty} #{pane_pid} #{pane_current_command}")
 	out, err := cmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("tmux list-panes: %w (is tmux running?)", err)
@@ -43,10 +44,10 @@ func parsePanes(output string) ([]Pane, error) {
 		if line == "" {
 			continue
 		}
-		// Format: "session window_index pane_index /dev/pts/N command"
-		// command may contain spaces, so split into at most 5 parts
-		parts := strings.SplitN(line, " ", 5)
-		if len(parts) < 5 {
+		// Format: "session window_index pane_index /dev/pts/N pid command"
+		// pid comes before command so command (which may contain spaces) is the last field.
+		parts := strings.SplitN(line, " ", 6)
+		if len(parts) < 6 {
 			continue
 		}
 		win, err := strconv.Atoi(parts[1])
@@ -57,23 +58,18 @@ func parsePanes(output string) ([]Pane, error) {
 		if err != nil {
 			continue
 		}
+		pid, err := strconv.Atoi(parts[4])
+		if err != nil {
+			continue
+		}
 		panes = append(panes, Pane{
 			Session: parts[0],
 			Window:  win,
 			PaneIdx: paneIdx,
 			TTY:     parts[3],
-			Command: parts[4],
+			PID:     pid,
+			Command: parts[5],
 		})
 	}
 	return panes, nil
-}
-
-// TTYToPaneMap builds a lookup from short TTY name (e.g. "pts/3") to Pane.
-func TTYToPaneMap(panes []Pane) map[string]*Pane {
-	m := make(map[string]*Pane, len(panes))
-	for i := range panes {
-		short := strings.TrimPrefix(panes[i].TTY, "/dev/")
-		m[short] = &panes[i]
-	}
-	return m
 }

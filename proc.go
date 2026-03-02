@@ -12,6 +12,7 @@ import (
 // ProcStat holds resource stats for a single process.
 type ProcStat struct {
 	PID    int
+	PPID   int
 	Comm   string
 	TTY    string  // short form: "pts/5"
 	RSS    int64   // KB
@@ -100,38 +101,39 @@ func decodeTTY(ttyNr int) string {
 // Returns the parsed fields needed for ProcStat calculation.
 // Fields (1-indexed per proc(5)):
 //
-//	1: pid, 2: (comm), 7: tty_nr, 14: utime, 15: stime, 22: starttime, 24: rss
-func parseStat(data string) (pid int, comm string, ttyNr int, utime, stime, starttime int64, rssPages int64, err error) {
+//	1: pid, 2: (comm), 4: ppid, 7: tty_nr, 14: utime, 15: stime, 22: starttime, 24: rss
+func parseStat(data string) (pid int, comm string, ppid int, ttyNr int, utime, stime, starttime int64, rssPages int64, err error) {
 	// comm is wrapped in parens and may contain spaces/parens, so find the last ')'
 	openParen := strings.IndexByte(data, '(')
 	closeParen := strings.LastIndexByte(data, ')')
 	if openParen < 0 || closeParen < 0 || closeParen <= openParen {
-		return 0, "", 0, 0, 0, 0, 0, fmt.Errorf("malformed stat: no comm field")
+		return 0, "", 0, 0, 0, 0, 0, 0, fmt.Errorf("malformed stat: no comm field")
 	}
 
 	pidStr := strings.TrimSpace(data[:openParen])
 	pid, err = strconv.Atoi(pidStr)
 	if err != nil {
-		return 0, "", 0, 0, 0, 0, 0, fmt.Errorf("malformed stat: bad pid %q", pidStr)
+		return 0, "", 0, 0, 0, 0, 0, 0, fmt.Errorf("malformed stat: bad pid %q", pidStr)
 	}
 	comm = data[openParen+1 : closeParen]
 
 	// Fields after comm start at index 0 = state (field 3 in proc(5))
 	rest := strings.Fields(data[closeParen+1:])
-	// We need: tty_nr (field 7 = index 4), utime (field 14 = index 11),
-	//          stime (field 15 = index 12), starttime (field 22 = index 19),
-	//          rss (field 24 = index 21)
+	// We need: ppid (field 4 = index 1), tty_nr (field 7 = index 4),
+	//          utime (field 14 = index 11), stime (field 15 = index 12),
+	//          starttime (field 22 = index 19), rss (field 24 = index 21)
 	if len(rest) < 22 {
-		return 0, "", 0, 0, 0, 0, 0, fmt.Errorf("malformed stat: too few fields (%d)", len(rest))
+		return 0, "", 0, 0, 0, 0, 0, 0, fmt.Errorf("malformed stat: too few fields (%d)", len(rest))
 	}
 
+	ppid, _ = strconv.Atoi(rest[1])
 	ttyNr, _ = strconv.Atoi(rest[4])
 	utime, _ = strconv.ParseInt(rest[11], 10, 64)
 	stime, _ = strconv.ParseInt(rest[12], 10, 64)
 	starttime, _ = strconv.ParseInt(rest[19], 10, 64)
 	rssPages, _ = strconv.ParseInt(rest[21], 10, 64)
 
-	return pid, comm, ttyNr, utime, stime, starttime, rssPages, nil
+	return pid, comm, ppid, ttyNr, utime, stime, starttime, rssPages, nil
 }
 
 // ReadAllProcs walks /proc and returns stats for all readable processes.
@@ -153,15 +155,12 @@ func ReadAllProcs() ([]ProcStat, error) {
 			continue // process may have exited
 		}
 
-		pid, comm, ttyNr, utime, stime, starttime, rssPages, err := parseStat(string(data))
+		pid, comm, ppid, ttyNr, utime, stime, starttime, rssPages, err := parseStat(string(data))
 		if err != nil {
 			continue
 		}
 
 		tty := decodeTTY(ttyNr)
-		if tty == "" {
-			continue // not on a PTY, skip
-		}
 
 		rssKB := rssPages * info.pageSizeKB
 
@@ -180,6 +179,7 @@ func ReadAllProcs() ([]ProcStat, error) {
 
 		procs = append(procs, ProcStat{
 			PID:    pid,
+			PPID:   ppid,
 			Comm:   comm,
 			TTY:    tty,
 			RSS:    rssKB,
@@ -189,15 +189,4 @@ func ReadAllProcs() ([]ProcStat, error) {
 	}
 
 	return procs, nil
-}
-
-// ProcsForTTY filters procs by a specific short TTY name.
-func ProcsForTTY(procs []ProcStat, tty string) []ProcStat {
-	var out []ProcStat
-	for _, p := range procs {
-		if p.TTY == tty {
-			out = append(out, p)
-		}
-	}
-	return out
 }
