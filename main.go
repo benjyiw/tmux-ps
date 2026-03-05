@@ -8,7 +8,10 @@ import (
 	"sort"
 	"strings"
 	"text/tabwriter"
+	"time"
 	"unicode/utf8"
+
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 // ANSI color codes.
@@ -71,7 +74,25 @@ func main() {
 	filterPane := flag.String("p", "", "show all processes for a specific pane (e.g. \"work:0.1\")")
 	showTree := flag.Bool("t", false, "show process trees for all panes")
 	groupBySession := flag.Bool("g", false, "group by session, sorted by cumulative memory")
+	watch := flag.Bool("w", false, "watch mode: periodically refresh like top")
+	interval := flag.Float64("i", 2, "refresh interval in seconds (used with -w)")
 	flag.Parse()
+
+	if *watch {
+		m := newWatchModel(
+			time.Duration(*interval*float64(time.Second)),
+			*sortField,
+			*showTree,
+			*groupBySession,
+			*topN,
+		)
+		p := tea.NewProgram(m, tea.WithAltScreen())
+		if _, err := p.Run(); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	panes, err := ListPanes()
 	if err != nil {
@@ -89,6 +110,60 @@ func main() {
 		os.Exit(1)
 	}
 
+	summaries, paneProcs := buildSummaries(panes, procs)
+
+	// Handle -p flag: show per-process detail.
+	if *filterPane != "" {
+		out, err := showPaneDetail(*filterPane, panes, paneProcs)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Print(out)
+		return
+	}
+
+	paneSort := makePaneSort(*sortField)
+
+	if *showTree {
+		fmt.Print(renderTree(summaries, paneSort, *topN))
+	} else if *groupBySession {
+		fmt.Print(renderGrouped(summaries, paneSort, *topN))
+	} else {
+		fmt.Print(renderFlat(summaries, paneSort, *topN))
+	}
+}
+
+func makePaneSort(sortField string) func(a, b PaneSummary) bool {
+	return func(a, b PaneSummary) bool {
+		switch sortField {
+		case "mem":
+			if a.MemPct != b.MemPct {
+				return a.MemPct > b.MemPct
+			}
+			return a.CPUPct > b.CPUPct
+		case "rss":
+			if a.RSS != b.RSS {
+				return a.RSS > b.RSS
+			}
+			return a.CPUPct > b.CPUPct
+		case "procs":
+			if a.NumProcs != b.NumProcs {
+				return a.NumProcs > b.NumProcs
+			}
+			return a.CPUPct > b.CPUPct
+		default:
+			if a.CPUPct != b.CPUPct {
+				return a.CPUPct > b.CPUPct
+			}
+			return a.MemPct > b.MemPct
+		}
+	}
+}
+
+// buildSummaries groups processes by pane and builds a PaneSummary for each.
+// It returns the summaries and the per-pane process map (keyed by short TTY).
+func buildSummaries(panes []Pane, procs []ProcStat) ([]PaneSummary, map[string][]ProcStat) {
 	// Build PID lookup and child map for tree walking.
 	pidMap := make(map[int]ProcStat)
 	for _, p := range procs {
@@ -118,12 +193,6 @@ func main() {
 		}
 	}
 
-	// Handle -p flag: show per-process detail.
-	if *filterPane != "" {
-		showPaneDetail(*filterPane, panes, paneProcs)
-		return
-	}
-
 	// Build summaries.
 	var summaries []PaneSummary
 	for i := range panes {
@@ -149,42 +218,10 @@ func main() {
 		summaries = append(summaries, s)
 	}
 
-	// Pane sort comparator used by both flat and grouped modes.
-	paneSort := func(a, b PaneSummary) bool {
-		switch *sortField {
-		case "mem":
-			if a.MemPct != b.MemPct {
-				return a.MemPct > b.MemPct
-			}
-			return a.CPUPct > b.CPUPct
-		case "rss":
-			if a.RSS != b.RSS {
-				return a.RSS > b.RSS
-			}
-			return a.CPUPct > b.CPUPct
-		case "procs":
-			if a.NumProcs != b.NumProcs {
-				return a.NumProcs > b.NumProcs
-			}
-			return a.CPUPct > b.CPUPct
-		default: // cpu
-			if a.CPUPct != b.CPUPct {
-				return a.CPUPct > b.CPUPct
-			}
-			return a.MemPct > b.MemPct
-		}
-	}
-
-	if *showTree {
-		renderTree(summaries, paneSort, *topN)
-	} else if *groupBySession {
-		renderGrouped(summaries, paneSort, *topN)
-	} else {
-		renderFlat(summaries, paneSort, *topN)
-	}
+	return summaries, paneProcs
 }
 
-func renderFlat(summaries []PaneSummary, less func(a, b PaneSummary) bool, topN int) {
+func renderFlat(summaries []PaneSummary, less func(a, b PaneSummary) bool, topN int) string {
 	sort.Slice(summaries, func(i, j int) bool {
 		return less(summaries[i], summaries[j])
 	})
@@ -211,21 +248,23 @@ func renderFlat(summaries []PaneSummary, less func(a, b PaneSummary) bool, topN 
 	}
 	w.Flush()
 
+	var sb strings.Builder
 	lines := strings.Split(buf.String(), "\n")
 	for i, line := range lines {
 		if line == "" {
 			continue
 		}
 		if i == 0 {
-			fmt.Println(bold + line + reset)
+			sb.WriteString(bold + line + reset + "\n")
 		} else if i-1 < len(summaries) {
 			c := colorForCPU(summaries[i-1].CPUPct)
-			fmt.Println(c + line + reset)
+			sb.WriteString(c + line + reset + "\n")
 		}
 	}
+	return sb.String()
 }
 
-func renderGrouped(summaries []PaneSummary, less func(a, b PaneSummary) bool, topN int) {
+func renderGrouped(summaries []PaneSummary, less func(a, b PaneSummary) bool, topN int) string {
 	type sessionGroup struct {
 		name     string
 		panes    []PaneSummary
@@ -308,6 +347,7 @@ func renderGrouped(summaries []PaneSummary, less func(a, b PaneSummary) bool, to
 		boundarySet[b] = gi
 	}
 
+	var sb strings.Builder
 	lines := strings.Split(buf.String(), "\n")
 	tableWidth := 0
 	if len(lines) > 0 {
@@ -318,7 +358,7 @@ func renderGrouped(summaries []PaneSummary, less func(a, b PaneSummary) bool, to
 			continue
 		}
 		if i == 0 {
-			fmt.Println(bold + line + reset)
+			sb.WriteString(bold + line + reset + "\n")
 			continue
 		}
 		dataIdx := i - 1
@@ -335,14 +375,15 @@ func renderGrouped(summaries []PaneSummary, less func(a, b PaneSummary) bool, to
 				padLen = 4
 			}
 			pad := strings.Repeat("━", padLen)
-			fmt.Println(dim + label + pad + stats + reset)
+			sb.WriteString(dim + label + pad + stats + reset + "\n")
 		}
 		c := colorForCPU(ordered[dataIdx].CPUPct)
-		fmt.Println(c + line + reset)
+		sb.WriteString(c + line + reset + "\n")
 	}
+	return sb.String()
 }
 
-func showPaneDetail(paneID string, panes []Pane, paneProcs map[string][]ProcStat) {
+func showPaneDetail(paneID string, panes []Pane, paneProcs map[string][]ProcStat) (string, error) {
 	// Find the pane.
 	var target *Pane
 	for i := range panes {
@@ -352,17 +393,18 @@ func showPaneDetail(paneID string, panes []Pane, paneProcs map[string][]ProcStat
 		}
 	}
 	if target == nil {
-		fmt.Fprintf(os.Stderr, "Error: pane %q not found\nAvailable panes:\n", paneID)
+		var available []string
 		for _, p := range panes {
-			fmt.Fprintf(os.Stderr, "  %s\n", p.PaneID())
+			available = append(available, p.PaneID())
 		}
-		os.Exit(1)
+		return "", fmt.Errorf("pane %q not found\nAvailable panes:\n  %s", paneID, strings.Join(available, "\n  "))
 	}
 
 	short := strings.TrimPrefix(target.TTY, "/dev/")
 	pp := paneProcs[short]
 
-	fmt.Printf("%sProcesses in pane %s (%s)%s\n\n", bold, paneID, target.TTY, reset)
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("%sProcesses in pane %s (%s)%s\n\n", bold, paneID, target.TTY, reset))
 
 	// Sort by CPU desc.
 	sort.Slice(pp, func(i, j int) bool {
@@ -384,12 +426,13 @@ func showPaneDetail(paneID string, panes []Pane, paneProcs map[string][]ProcStat
 			continue
 		}
 		if i == 0 {
-			fmt.Println(bold + line + reset)
+			sb.WriteString(bold + line + reset + "\n")
 		} else if i-1 < len(pp) {
 			c := colorForCPU(pp[i-1].CPUPct)
-			fmt.Println(c + line + reset)
+			sb.WriteString(c + line + reset + "\n")
 		}
 	}
+	return sb.String(), nil
 }
 
 type treeEntry struct {
@@ -398,7 +441,7 @@ type treeEntry struct {
 	paneLabel string // non-empty for the first entry of each pane
 }
 
-func renderTree(summaries []PaneSummary, less func(a, b PaneSummary) bool, topN int) {
+func renderTree(summaries []PaneSummary, less func(a, b PaneSummary) bool, topN int) string {
 	sort.Slice(summaries, func(i, j int) bool {
 		return less(summaries[i], summaries[j])
 	})
@@ -421,8 +464,7 @@ func renderTree(summaries []PaneSummary, less func(a, b PaneSummary) bool, topN 
 	}
 
 	if len(allEntries) == 0 {
-		fmt.Println(dim + "(no processes)" + reset)
-		return
+		return dim + "(no processes)" + reset + "\n"
 	}
 
 	// Find max display widths for column alignment.
@@ -438,10 +480,12 @@ func renderTree(summaries []PaneSummary, less func(a, b PaneSummary) bool, topN 
 		}
 	}
 
+	var sb strings.Builder
+
 	// Print header.
 	hdr := fmt.Sprintf("%-*s  %5s  %5s  %5s  %-*s  %s",
 		maxPIDCol, "PID", "CPU%", "MEM%", "RSS", maxCmdCol, "COMMAND", "PANE")
-	fmt.Println(bold + hdr + reset)
+	sb.WriteString(bold + hdr + reset + "\n")
 
 	// Print entries.
 	for _, e := range allEntries {
@@ -458,8 +502,9 @@ func renderTree(summaries []PaneSummary, less func(a, b PaneSummary) bool, topN 
 			line += "  " + dim + e.paneLabel + reset
 		}
 		c := colorForCPU(e.proc.CPUPct)
-		fmt.Println(c + line + reset)
+		sb.WriteString(c + line + reset + "\n")
 	}
+	return sb.String()
 }
 
 func buildPaneTree(s PaneSummary) []treeEntry {
