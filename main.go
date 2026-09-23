@@ -76,7 +76,13 @@ func main() {
 	groupBySession := flag.Bool("g", false, "group by session, sorted by cumulative memory")
 	watch := flag.Bool("w", false, "watch mode: periodically refresh like top")
 	interval := flag.Float64("i", 2, "refresh interval in seconds (used with -w)")
+	mux := flag.String("m", "tmux", "multiplexer backend: tmux or herdr")
 	flag.Parse()
+
+	listPanes := ListPanes
+	if *mux == "herdr" {
+		listPanes = ListPanesHerdr
+	}
 
 	if *watch {
 		m := newWatchModel(
@@ -85,6 +91,7 @@ func main() {
 			*showTree,
 			*groupBySession,
 			*topN,
+			listPanes,
 		)
 		p := tea.NewProgram(m, tea.WithAltScreen())
 		if _, err := p.Run(); err != nil {
@@ -94,13 +101,13 @@ func main() {
 		return
 	}
 
-	panes, err := ListPanes()
+	panes, err := listPanes()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 	if len(panes) == 0 {
-		fmt.Fprintf(os.Stderr, "No tmux panes found.\n")
+		fmt.Fprintf(os.Stderr, "No %s panes found.\n", *mux)
 		os.Exit(1)
 	}
 
@@ -162,7 +169,8 @@ func makePaneSort(sortField string) func(a, b PaneSummary) bool {
 }
 
 // buildSummaries groups processes by pane and builds a PaneSummary for each.
-// It returns the summaries and the per-pane process map (keyed by short TTY).
+// It returns the summaries and the per-pane process map (keyed by Pane.PaneID(),
+// which is unique — unlike TTY, which can be empty or repeated across panes).
 func buildSummaries(panes []Pane, procs []ProcStat) ([]PaneSummary, map[string][]ProcStat) {
 	// Build PID lookup and child map for tree walking.
 	pidMap := make(map[int]ProcStat)
@@ -172,22 +180,22 @@ func buildSummaries(panes []Pane, procs []ProcStat) ([]PaneSummary, map[string][
 	childMap := BuildChildMap(procs)
 
 	// Group procs by pane using tree walk from pane PID.
-	paneProcs := make(map[string][]ProcStat) // key: short tty
+	paneProcs := make(map[string][]ProcStat) // key: pane.PaneID()
 	for _, pane := range panes {
-		short := strings.TrimPrefix(pane.TTY, "/dev/")
+		key := pane.PaneID()
 		if pane.PID > 0 {
 			// Tree walk: find all descendants of pane's root process
 			desc := Descendants(childMap, pane.PID)
 			for pid := range desc {
 				if ps, ok := pidMap[pid]; ok {
-					paneProcs[short] = append(paneProcs[short], ps)
+					paneProcs[key] = append(paneProcs[key], ps)
 				}
 			}
-		} else {
+		} else if short := strings.TrimPrefix(pane.TTY, "/dev/"); short != "" {
 			// Fallback: TTY matching (pane_pid unavailable)
 			for _, p := range procs {
 				if p.TTY == short {
-					paneProcs[short] = append(paneProcs[short], p)
+					paneProcs[key] = append(paneProcs[key], p)
 				}
 			}
 		}
@@ -196,8 +204,7 @@ func buildSummaries(panes []Pane, procs []ProcStat) ([]PaneSummary, map[string][
 	// Build summaries.
 	var summaries []PaneSummary
 	for i := range panes {
-		short := strings.TrimPrefix(panes[i].TTY, "/dev/")
-		pp := paneProcs[short]
+		pp := paneProcs[panes[i].PaneID()]
 
 		var s PaneSummary
 		s.Pane = &panes[i]
@@ -400,8 +407,7 @@ func showPaneDetail(paneID string, panes []Pane, paneProcs map[string][]ProcStat
 		return "", fmt.Errorf("pane %q not found\nAvailable panes:\n  %s", paneID, strings.Join(available, "\n  "))
 	}
 
-	short := strings.TrimPrefix(target.TTY, "/dev/")
-	pp := paneProcs[short]
+	pp := paneProcs[target.PaneID()]
 
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("%sProcesses in pane %s (%s)%s\n\n", bold, paneID, target.TTY, reset))

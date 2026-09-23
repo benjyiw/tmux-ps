@@ -1,3 +1,5 @@
+//go:build linux
+
 package main
 
 import (
@@ -134,21 +136,3 @@ func TestCPUPctCalculation(t *testing.T) {
 	}
 }
 
-func TestFormatRSS(t *testing.T) {
-	tests := []struct {
-		kb   int64
-		want string
-	}{
-		{500, "500K"},
-		{1024, "1M"},
-		{12800, "12M"},
-		{1048576, "1.0G"},
-		{1572864, "1.5G"},
-	}
-	for _, tt := range tests {
-		got := formatRSS(tt.kb)
-		if got != tt.want {
-			t.Errorf("formatRSS(%d) = %q, want %q", tt.kb, got, tt.want)
-		}
-	}
-}

@@ -16,6 +16,7 @@ type watchModel struct {
 	showTree       bool
 	groupBySession bool
 	topN           int
+	listPanes      func() ([]Pane, error)
 	summaries      []PaneSummary
 	paneProcs      map[string][]ProcStat
 	panes          []Pane
@@ -27,13 +28,14 @@ type watchModel struct {
 
 var sortFields = []string{"cpu", "mem", "rss", "procs"}
 
-func newWatchModel(interval time.Duration, sortField string, showTree, groupBySession bool, topN int) watchModel {
+func newWatchModel(interval time.Duration, sortField string, showTree, groupBySession bool, topN int, listPanes func() ([]Pane, error)) watchModel {
 	return watchModel{
 		interval:       interval,
 		sortField:      sortField,
 		showTree:       showTree,
 		groupBySession: groupBySession,
 		topN:           topN,
+		listPanes:      listPanes,
 	}
 }
 
@@ -91,7 +93,7 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 
 	case refreshMsg:
-		panes, err := ListPanes()
+		panes, err := m.listPanes()
 		if err != nil {
 			m.err = err
 			return m, m.tick()

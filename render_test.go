@@ -5,6 +5,25 @@ import (
 	"testing"
 )
 
+func TestFormatRSS(t *testing.T) {
+	tests := []struct {
+		kb   int64
+		want string
+	}{
+		{500, "500K"},
+		{1024, "1M"},
+		{12800, "12M"},
+		{1048576, "1.0G"},
+		{1572864, "1.5G"},
+	}
+	for _, tt := range tests {
+		got := formatRSS(tt.kb)
+		if got != tt.want {
+			t.Errorf("formatRSS(%d) = %q, want %q", tt.kb, got, tt.want)
+		}
+	}
+}
+
 // helper to build test summaries
 func testSummaries() []PaneSummary {
 	pane1 := Pane{Session: "work", Window: 0, PaneIdx: 0, TTY: "/dev/pts/1", PID: 100, Command: "zsh"}
@@ -135,7 +154,7 @@ func TestShowPaneDetail(t *testing.T) {
 		{Session: "work", Window: 0, PaneIdx: 1, TTY: "/dev/pts/2", PID: 200, Command: "vim"},
 	}
 	paneProcs := map[string][]ProcStat{
-		"pts/2": {
+		"work:0.1": {
 			{PID: 200, PPID: 1, Comm: "vim", CPUPct: 0.5, MemPct: 1.1, RSS: 8192},
 		},
 	}
@@ -173,8 +192,8 @@ func TestBuildSummaries(t *testing.T) {
 	if summaries[0].TopProcess != "python" {
 		t.Errorf("TopProcess = %q, want %q", summaries[0].TopProcess, "python")
 	}
-	if len(paneProcs["pts/3"]) != 2 {
-		t.Errorf("paneProcs[pts/3] = %d procs, want 2", len(paneProcs["pts/3"]))
+	if len(paneProcs["work:0.0"]) != 2 {
+		t.Errorf("paneProcs[work:0.0] = %d procs, want 2", len(paneProcs["work:0.0"]))
 	}
 }
 

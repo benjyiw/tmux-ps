@@ -1,8 +1,8 @@
 # tmux-ps
 
-Point-in-time resource usage per tmux pane. Like `ps`, but with tmux information.
+Point-in-time resource usage per tmux (or [herdr](https://github.com/herdrdev/herdr)) pane. Like `ps`, but with multiplexer information.
 
-Reads `/proc` directly — no dependency on `ps` or external tools beyond `tmux` itself.
+On Linux, reads `/proc` directly. On macOS, shells out to `ps` (no `/proc` there).
 
 ## Install
 
@@ -31,6 +31,7 @@ tmux-ps [flags]
 | `-t` | Show process tree for the top pane |
 | `-w` | Watch mode: periodically refresh like `top` |
 | `-i SECONDS` | Refresh interval in seconds (default: 2, used with `-w`) |
+| `-m BACKEND` | Multiplexer backend: `tmux` (default) or `herdr` |
 
 ### Watch mode controls
 
