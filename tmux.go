@@ -30,7 +30,7 @@ func (p Pane) WindowLabel() string {
 // ListPanes shells out to tmux and returns all panes across all sessions.
 func ListPanes() ([]Pane, error) {
 	cmd := exec.Command("tmux", "list-panes", "-a", "-F",
-		"#{session_name} #{window_index} #{pane_index} #{pane_tty} #{pane_pid} #{pane_current_command}")
+		"#{session_name}\t#{window_index}\t#{pane_index}\t#{pane_tty}\t#{pane_pid}\t#{pane_current_command}")
 	out, err := cmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("tmux list-panes: %w (is tmux running?)", err)
@@ -44,9 +44,9 @@ func parsePanes(output string) ([]Pane, error) {
 		if line == "" {
 			continue
 		}
-		// Format: "session window_index pane_index /dev/pts/N pid command"
+		// Format: tab-separated "session window_index pane_index /dev/pts/N pid command"
 		// pid comes before command so command (which may contain spaces) is the last field.
-		parts := strings.SplitN(line, " ", 6)
+		parts := strings.SplitN(line, "\t", 6)
 		if len(parts) < 6 {
 			continue
 		}
